@@ -3,9 +3,9 @@
 echo "Stopping MovieBrowser Backend..."
 
 # Check if systemd service exists and is active
-if systemctl is-active --quiet moviebrowser.service 2>/dev/null; then
+if systemctl --user is-active --quiet moviebrowser_backend_v1.service 2>/dev/null; then
     echo "Stopping systemd service..."
-    sudo systemctl stop moviebrowser.service
+    systemctl --user stop moviebrowser_backend_v1.service
     echo "MovieBrowser Backend service stopped"
 else
     # Fallback: Find and kill the process using port 8000

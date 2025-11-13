@@ -4,20 +4,22 @@
 echo "Starting MovieBrowser Backend..."
 
 # Check if systemd service exists
-if systemctl list-unit-files moviebrowser.service &>/dev/null; then
+if systemctl --user list-unit-files moviebrowser_backend_v1.service &>/dev/null; then
     # Use systemd service
-    if systemctl is-active --quiet moviebrowser.service; then
+    if systemctl --user is-active --quiet moviebrowser_backend_v1.service; then
         echo "MovieBrowser Backend service is already running"
-        sudo systemctl status moviebrowser.service --no-pager
+        systemctl --user status moviebrowser_backend_v1.service --no-pager
     else
         echo "Starting systemd service..."
-        sudo systemctl start moviebrowser.service
+        systemctl --user start moviebrowser_backend_v1.service
         sleep 2
-        if systemctl is-active --quiet moviebrowser.service; then
+        if systemctl --user is-active --quiet moviebrowser_backend_v1.service; then
             echo "MovieBrowser Backend service started successfully"
-            sudo systemctl status moviebrowser.service --no-pager
+            systemctl --user status moviebrowser_backend_v1.service --no-pager
         else
-            echo "Failed to start service. Check logs with: sudo journalctl -u moviebrowser -n 50"
+            echo "Failed to start service. Check logs with: journalctl --user -u moviebrowser_backend_v1 -n 50"
         fi
     fi
+else
+    echo "Systemd service not found. Run ./scripts/setup_service.sh first."
 fi
