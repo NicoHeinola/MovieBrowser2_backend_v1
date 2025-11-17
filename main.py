@@ -51,4 +51,4 @@ if __name__ == "__main__":
     should_reload: bool = is_dev_environment
     uvicorn_app = "main:app" if is_dev_environment else app
 
-    uvicorn.run(uvicorn_app, host="0.0.0.0", port=8000, reload=should_reload)
+    uvicorn.run(uvicorn_app, host="0.0.0.0", port=8077, reload=should_reload)
