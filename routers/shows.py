@@ -1,13 +1,14 @@
 import os
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
-from sqlalchemy.orm import Session
-from typing import List
+from sqlalchemy.orm import Session, selectinload
+from typing import List, Optional, cast
 
 from middleware.authenticated_route import authenticated_route, optionally_authenticated_route
 from middleware.is_admin import is_admin
 from middleware.query_parser import get_parsed_query_params
 from models.setting import Setting
 from models.user import User
+from models.user_watch_season import UserWatchSeason as UserWatchSeasonModel
 from models.user_watch_season import UserWatchSeason
 from schemas.episode import Episode
 from schemas.paginated_response import PaginatedResponse
@@ -16,11 +17,146 @@ from models.show import Show as ShowModel
 from database import get_db
 from models.episode import Episode as EpisodeModel
 from models.season import Season as SeasonModel
-from models.show import Show as ShowModel
 from utils.pagination import paginate_query
 from utils.vlc_media_player_util import VLCMediaPlayerUtil
 
 router = APIRouter()
+
+
+@router.get("/export")
+@authenticated_route
+@is_admin
+def export_shows(request: Request, db: Session = Depends(get_db)):
+    """
+    Export all show-related data in a migration-friendly payload.
+    This includes shows, seasons, episodes, categories, and user progress links.
+    """
+
+    shows = (
+        db.query(ShowModel)
+        .options(
+            selectinload(ShowModel.seasons).selectinload(SeasonModel.episodes),
+            selectinload(ShowModel.categories),
+            selectinload(ShowModel.user_show_statuses),
+        )
+        .all()
+    )
+
+    user_watch_seasons = db.query(UserWatchSeasonModel).all()
+
+    users = db.query(User).all()
+    users_by_id = {user.id: user for user in users}
+
+    watch_seasons_by_show_id: dict[int, list[UserWatchSeasonModel]] = {}
+    for user_watch_season in user_watch_seasons:
+        show_id = cast(int, user_watch_season.show_id)
+        if show_id not in watch_seasons_by_show_id:
+            watch_seasons_by_show_id[show_id] = []
+        watch_seasons_by_show_id[show_id].append(user_watch_season)
+
+    exported_shows = []
+    for show in shows:
+        current_show_id = cast(int, show.id)
+        show_folder_name = cast(str, show.folder_name)
+        show_relative_folder_path = show_folder_name
+        show_absolute_folder_path = show.get_full_folder_path()
+        show_payload = {
+            "id": current_show_id,
+            "title": show.title,
+            "description": show.description,
+            "image": show.image,
+            "folder_name": show_folder_name,
+            "folder_path": {
+                "relative": show_relative_folder_path,
+                "absolute": show_absolute_folder_path,
+            },
+            "categories": [
+                {
+                    "id": category.id,
+                    "name": category.name,
+                }
+                for category in show.categories
+            ],
+            "seasons": [],
+            "user_show_statuses": [
+                {
+                    "id": user_show_status.id,
+                    "user_id": cast(int, user_show_status.user_id),
+                    "username": (
+                        users_by_id[user_show_status.user_id].username
+                        if user_show_status.user_id in users_by_id
+                        else None
+                    ),
+                    "status": user_show_status.status,
+                }
+                for user_show_status in show.user_show_statuses
+            ],
+            "user_watch_seasons": [
+                {
+                    "id": user_watch_season.id,
+                    "user_id": cast(int, user_watch_season.user_id),
+                    "username": (
+                        users_by_id[user_watch_season.user_id].username
+                        if user_watch_season.user_id in users_by_id
+                        else None
+                    ),
+                    "season_id": user_watch_season.season_id,
+                }
+                for user_watch_season in watch_seasons_by_show_id.get(current_show_id, [])
+            ],
+        }
+
+        for season in show.seasons:
+            season_folder_name = cast(str, season.folder_name)
+            season_relative_folder_path = (
+                os.path.join(show_relative_folder_path, season_folder_name).replace("\\", "/")
+                if show_relative_folder_path and season_folder_name
+                else None
+            )
+            season_absolute_folder_path = season.get_full_folder_path()
+            season_payload = {
+                "id": season.id,
+                "title": season.title,
+                "description": season.description,
+                "image": season.image,
+                "number": season.number,
+                "folder_name": season_folder_name,
+                "folder_path": {
+                    "relative": season_relative_folder_path,
+                    "absolute": season_absolute_folder_path,
+                },
+                "episodes": [],
+            }
+
+            for episode in season.episodes:
+                episode_filename = cast(Optional[str], episode.filename)
+                episode_relative_file_path = (
+                    os.path.join(season_relative_folder_path, episode_filename).replace("\\", "/")
+                    if season_relative_folder_path and episode_filename
+                    else None
+                )
+                episode_absolute_file_path = episode.get_full_file_path()
+                season_payload["episodes"].append(
+                    {
+                        "id": episode.id,
+                        "title": episode.title,
+                        "description": episode.description,
+                        "number": episode.number,
+                        "type": episode.type,
+                        "filename": episode_filename,
+                        "file_path": {
+                            "relative": episode_relative_file_path,
+                            "absolute": episode_absolute_file_path,
+                        },
+                        "file_size_bytes": episode.file_size_bytes,
+                    }
+                )
+
+            show_payload["seasons"].append(season_payload)
+
+        exported_shows.append(show_payload)
+
+    return exported_shows
 
 
 @router.get("/", response_model=PaginatedResponse)
@@ -36,14 +172,14 @@ def read_shows(request: Request, db: Session = Depends(get_db)):
         query = ShowModel.filterBySearch(query, parsed_params["search"])
 
     # Example: Handle userShowStatus filter if it exists
-    user: User = request.state.user if hasattr(request.state, "user") else None
+    user: Optional[User] = request.state.user if hasattr(request.state, "user") else None
     if "userShowStatus:in" in parsed_params and user:
         user_show_statuses = parsed_params["userShowStatus:in"]
-        query = ShowModel.filterByUserShowStatusIn(query, user.id, user_show_statuses)
+        query = ShowModel.filterByUserShowStatusIn(query, cast(int, user.id), user_show_statuses)
 
     if "userShowStatus:notIn" in parsed_params and user:
         user_show_statuses = parsed_params["userShowStatus:notIn"]
-        query = ShowModel.filterByUserShowStatusNotIn(query, user.id, user_show_statuses)
+        query = ShowModel.filterByUserShowStatusNotIn(query, cast(int, user.id), user_show_statuses)
 
     # Handle categories filter
     if "categories:anyIn" in parsed_params and parsed_params["categories:anyIn"]:
@@ -176,7 +312,7 @@ def cleanup_shows(request: Request, db: Session = Depends(get_db)):
                 if os.path.exists(episode_file_path):
                     files_to_keep.append(episode_file_path)
 
-    base_folder: str = Setting.get_shows_folder_path()
+    base_folder: str | None = Setting.get_shows_folder_path()
 
     if not base_folder:
         raise HTTPException(status_code=500, detail="Base folder for shows is not configured.")
@@ -216,7 +352,7 @@ def watch_episode(show_id: int, episode_id: int, db: Session = Depends(get_db)):
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found for this show")
 
-    file_path: str = episode.get_full_file_path()
+    file_path: str | None = episode.get_full_file_path()
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Episode file not found")
 
@@ -238,11 +374,11 @@ def watch_season(request: Request, show_id: int, season_id: int, db: Session = D
     if not season:
         raise HTTPException(status_code=404, detail="Season not found for this show")
 
-    folder_path: str = season.get_full_folder_path()
+    folder_path: str | None = season.get_full_folder_path()
     if not folder_path or not os.path.isdir(folder_path):
         raise HTTPException(status_code=404, detail="Season folder not found")
 
-    user: User = request.state.user if hasattr(request.state, "user") else None
+    user: Optional[User] = request.state.user if hasattr(request.state, "user") else None
 
     # Save last watched season in the database and remove old one
     if user:
